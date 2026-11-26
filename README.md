@@ -39,7 +39,7 @@ export DATABASE_URL=postgresql://postgres:<password>@localhost:5432/geip
 .venv/bin/pytest tests                           # DB tests need TEST_DATABASE_URL (a throwaway DB)
 ```
 
-Target countries are ISO3 codes in `countries`. Each `datasources/<folder>/` holds one World Bank download
+Target countries are ISO3 codes in `first10countries.txt` (override with `--countries`). Each `datasources/<folder>/` holds one World Bank download
 (`API_*.csv` + its two `Metadata_*` files); the folder name doesn't matter.
 
 Tables: `raw.files` (one row per file, sha256, source date, status), `raw.observations` (every value as parsed),

@@ -31,7 +31,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_SOURCES = ROOT / "datasources"
-DEFAULT_COUNTRIES = ROOT / "countries"
+DEFAULT_COUNTRIES = ROOT / "first10countries.txt"
 SCHEMA_FILE = ROOT / "schema.sql"
 SOURCE = "worldbank"
 
