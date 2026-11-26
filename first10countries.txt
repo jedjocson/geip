@@ -1,0 +1,11 @@
+# Target countries as World Bank / ISO3 codes (one per line, '#' starts a comment)
+ARM  # Armenia
+BFA  # Burkina Faso
+COG  # Congo, Rep.
+GUY  # Guyana
+LSO  # Lesotho
+FSM  # Micronesia, Fed. Sts.
+PHL  # Philippines
+SVN  # Slovenia
+MAF  # St. Martin (French part)
+SYR  # Syrian Arab Republic
