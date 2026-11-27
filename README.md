@@ -36,11 +36,17 @@ export DATABASE_URL=postgresql://postgres:<password>@localhost:5432/geip
 .venv/bin/python ingest.py --init-db             # create tables and load
 .venv/bin/python ingest.py                       # rerun: unchanged files are skipped
 .venv/bin/python ingest.py --start-year 2000     # backfill a wider window
+.venv/bin/python ingest.py --api                 # fetch from the World Bank API instead of the CSVs
 .venv/bin/pytest tests                           # DB tests need TEST_DATABASE_URL (a throwaway DB)
 ```
 
 Target countries are ISO3 codes in `first10countries.txt` (override with `--countries`). Each `datasources/<folder>/` holds one World Bank download
 (`API_*.csv` + its two `Metadata_*` files); the folder name doesn't matter.
+
+With `--api`, `wb_api.py` calls the World Bank Indicators API (v2) for just the target countries (all years)
+and saves each indicator's raw responses as one JSON snapshot in `responses/<indicator>/` (gitignored, named by
+content hash). Snapshots load through the same path as the CSVs, so unchanged data is skipped and revised values
+land in `core.observation_history`.
 
 Tables: `raw.files` (one row per file, sha256, source date, status), `raw.observations` (every value as parsed),
 `core.country`, `core.indicator` (with unit and frequency), `core.observation` (target countries and years),

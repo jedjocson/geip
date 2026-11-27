@@ -10,6 +10,7 @@ Usage:
     python ingest.py --dry-run                 # parse + validate only, no database
     python ingest.py --start-year 2000         # backfill a wider window
     python ingest.py --force                   # reload files already ingested
+    python ingest.py --api                     # fetch from the World Bank API instead (wb_api.py)
 
 Connection comes from DATABASE_URL (default postgresql://postgres@localhost:5432/geip);
 the password can come from PGPASSWORD or ~/.pgpass.
@@ -401,22 +402,30 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--init-db", action="store_true", help="apply schema.sql first")
     ap.add_argument("--dry-run", action="store_true", help="parse and validate only")
     ap.add_argument("--force", action="store_true", help="reload files already ingested")
+    ap.add_argument("--api", action="store_true",
+                    help="fetch from the World Bank API (see wb_api.py) instead of reading --sources")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     targets = load_targets(args.countries)
-    sources = discover(args.sources)
-    if not sources:
-        log.error("no API_*.csv files under %s", args.sources)
-        return 1
+    fetch_failures = 0
+    if args.api:
+        import wb_api
 
-    parsed = []
-    for src in sources:
-        p = parse(src)
+        parsed, fetch_failures = wb_api.fetch(targets)
+        if not parsed:
+            log.error("nothing fetched from the World Bank API")
+            return 1
+    else:
+        sources = discover(args.sources)
+        if not sources:
+            log.error("no API_*.csv files under %s", args.sources)
+            return 1
+        parsed = [parse(src) for src in sources]
+    for p in parsed:
         for w in p.warnings:
-            log.warning("%s: %s", src.data.name, w)
-        parsed.append(p)
+            log.warning("%s: %s", p.source.data.name, w)
 
     start, end = year_window(parsed, args.start_year, args.end_year, args.years)
     log.info("%d files, %d target countries, years %d-%d", len(parsed), len(targets), start, end)
@@ -435,7 +444,7 @@ def main(argv: list[str] | None = None) -> int:
                 p.source.data.parent.name.strip(), len(p.observations), len(sel),
                 expected, expected - len(sel), p.source.source_updated,
             )
-        return 0
+        return 1 if fetch_failures else 0
 
     failures = 0
     with connect() as conn:
@@ -447,8 +456,8 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 failures += 1
                 log.exception("failed to load %s", p.source.data.name)
-    log.info("done: %d loaded or skipped, %d failed", len(parsed) - failures, failures)
-    return 1 if failures else 0
+    log.info("done: %d loaded or skipped, %d failed", len(parsed) - failures, failures + fetch_failures)
+    return 1 if failures or fetch_failures else 0
 
 
 if __name__ == "__main__":
