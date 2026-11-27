@@ -48,3 +48,15 @@ re-downloads these from the World Bank (see `fetch.py`); if a download fails, th
 Tables: `raw.files` (one row per file, sha256, source date, status), `raw.observations` (every value as parsed),
 `core.country`, `core.indicator` (with unit and frequency), `core.observation` (target countries and years),
 `core.observation_history` (previous values when a source revises a number).
+
+## Dashboard (Streamlit)
+
+```bash
+.venv/bin/streamlit run dashboard.py             # http://localhost:8501, reads DATABASE_URL
+```
+
+Line charts of `core.observation` with filters for indicator, countries and years. "One indicator" shows a
+single chart with its unit, frequency and source date, plus a data table and CSV download; "All indicators"
+shows the four side by side. Turn on *Log scale* when countries differ by orders of magnitude (GDP,
+population). Aggregates such as "World" are available but not selected by default. Data is cached for
+5 minutes; *Reload data* refreshes it after an ingest.
