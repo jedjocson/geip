@@ -11,6 +11,7 @@ If a download fails, the files already on disk for that indicator are used.
 Usage:
     python ingest.py                           # fetch, create the schema if missing, load
     python ingest.py --no-fetch                # load the files already in datasources/
+    python ingest.py --countries first10countries.txt   # only these ISO3 codes (default: all countries)
     python ingest.py --init-db                 # re-apply schema.sql even if the tables exist
     python ingest.py --dry-run                 # parse + validate only, no database
     python ingest.py --start-year 2000         # backfill a wider window
@@ -36,7 +37,6 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_SOURCES = ROOT / "datasources"
-DEFAULT_COUNTRIES = ROOT / "first10countries.txt"
 SCHEMA_FILE = ROOT / "schema.sql"
 SOURCE = "worldbank"
 
@@ -219,6 +219,14 @@ def load_targets(path: Path) -> list[str]:
     return codes
 
 
+def all_countries(parsed: list[Parsed]) -> list[str]:
+    """Every real country (not World/region/income-group aggregates) in any file's metadata."""
+    codes: set[str] = set()
+    for p in parsed:
+        codes |= set(p.countries.loc[~p.countries.is_aggregate.astype(bool), "country_code"])
+    return sorted(codes)
+
+
 def select(obs: pd.DataFrame, countries: list[str], start: int, end: int) -> pd.DataFrame:
     """The subset of observations that goes into core.observation."""
     mask = obs.country_code.isin(countries) & obs.year.between(start, end)
@@ -275,11 +283,15 @@ def load(conn, p: Parsed, targets: list[str], start: int, end: int, force: bool)
     row = conn.execute(
         "SELECT file_id, status FROM raw.files WHERE sha256 = %s", (src.sha256,)
     ).fetchone()
-    if row and row[1] == "loaded" and not force:
-        log.info("%s: already loaded as file_id=%s, skipping", rel, row[0])
-        return "skipped"
-
     selected = select(p.observations, targets, start, end)
+    if row and row[1] == "loaded" and not force:
+        # Same file as before, but the countries or years asked for may have changed.
+        _stage(conn, selected)
+        if _matched(conn) == len(selected):
+            log.info("%s: already loaded as file_id=%s, skipping", rel, row[0])
+            return "skipped"
+        log.info("%s: already loaded, but the selected countries/years aren't all in core.observation; "
+                 "reloading", rel)
     try:
         with conn.transaction():
             file_id = _register_file(conn, src, rel, row)
@@ -288,13 +300,7 @@ def load(conn, p: Parsed, targets: list[str], start: int, end: int, force: bool)
             counts = _upsert_observations(conn, file_id, selected)
 
             # Reconcile: every selected row must now be present with its new value.
-            present = conn.execute(
-                """
-                SELECT count(*) FROM core.observation o JOIN pg_temp.stage s
-                  USING (country_code, indicator_code, year)
-                 WHERE o.value = s.value
-                """
-            ).fetchone()[0]
+            present = _matched(conn)
             if present != len(selected):
                 raise RuntimeError(f"reconciliation failed: staged {len(selected)}, matched {present}")
 
@@ -366,7 +372,8 @@ def _upsert_dimensions(conn, p: Parsed) -> None:
         )
 
 
-def _upsert_observations(conn, file_id: int, selected: pd.DataFrame) -> dict[str, int]:
+def _stage(conn, selected: pd.DataFrame) -> None:
+    """Put the selected observations in the pg_temp.stage table."""
     conn.execute(
         """CREATE TEMP TABLE IF NOT EXISTS stage (
              country_code char(3), indicator_code text, year integer, value double precision
@@ -376,6 +383,19 @@ def _upsert_observations(conn, file_id: int, selected: pd.DataFrame) -> dict[str
     with conn.cursor().copy("COPY pg_temp.stage FROM STDIN") as cp:
         for r in selected.itertuples(index=False):
             cp.write_row((r.country_code, r.indicator_code, r.year, r.value))
+
+
+def _matched(conn) -> int:
+    """How many staged rows are in core.observation with the same value."""
+    return conn.execute(
+        """SELECT count(*) FROM core.observation o JOIN pg_temp.stage s
+             USING (country_code, indicator_code, year)
+            WHERE o.value = s.value"""
+    ).fetchone()[0]
+
+
+def _upsert_observations(conn, file_id: int, selected: pd.DataFrame) -> dict[str, int]:
+    _stage(conn, selected)
 
     # Keep the old value before overwriting a revised observation.
     revised = conn.execute(
@@ -417,7 +437,9 @@ def _mark_failed(conn, src: SourceFile, rel: str, exc: Exception) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sources", type=Path, default=DEFAULT_SOURCES)
-    ap.add_argument("--countries", type=Path, default=DEFAULT_COUNTRIES)
+    ap.add_argument("--countries", type=Path,
+                    help="file of ISO3 codes to load (e.g. first10countries.txt); "
+                         "default: every country in the World Bank metadata, excluding aggregates")
     ap.add_argument("--start-year", type=int)
     ap.add_argument("--end-year", type=int, help="default: latest year in the files")
     ap.add_argument("--years", type=int, default=10, help="window size when --start-year is omitted")
@@ -436,7 +458,6 @@ def main(argv: list[str] | None = None) -> int:
         if fetch.fetch_all(args.sources):
             log.warning("some downloads failed; ingesting the files already on disk for those")
 
-    targets = load_targets(args.countries)
     sources = discover(args.sources)
     if not sources:
         log.error("no API_*.csv files under %s", args.sources)
@@ -448,6 +469,15 @@ def main(argv: list[str] | None = None) -> int:
         for w in p.warnings:
             log.warning("%s: %s", src.data.name, w)
         parsed.append(p)
+
+    if args.countries:
+        targets = load_targets(args.countries)
+    else:
+        targets = all_countries(parsed)
+        log.info("no --countries given: loading all %d countries in the metadata", len(targets))
+    if not targets:
+        log.error("no target countries")
+        return 1
 
     start, end = year_window(parsed, args.start_year, args.end_year, args.years)
     log.info("%d files, %d target countries, years %d-%d", len(parsed), len(targets), start, end)

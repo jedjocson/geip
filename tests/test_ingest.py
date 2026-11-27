@@ -221,3 +221,32 @@ def test_main_uses_existing_files_when_fetch_fails(tmp_path, monkeypatch):
     countries = tmp_path / "countries"
     countries.write_text("PHL\n")
     assert ingest.main(["--dry-run", "--sources", str(sources), "--countries", str(countries)]) == 0
+
+
+def test_all_countries_excludes_aggregates(source):
+    assert ingest.all_countries([ingest.parse(source)]) == ["ARM", "PHL"]
+
+
+def test_main_defaults_to_all_countries(tmp_path, caplog):
+    sources = write_fixture(tmp_path / "ds")
+    caplog.set_level("INFO")
+    assert ingest.main(["--no-fetch", "--dry-run", "--sources", str(sources)]) == 0
+    assert "loading all 2 countries" in caplog.text
+    assert "2 target countries" in caplog.text
+
+
+def test_widening_countries_reloads_an_already_loaded_file(conn, tmp_path):
+    [src] = ingest.discover(write_fixture(tmp_path / "ds"))
+    p = ingest.parse(src)
+    assert ingest.load(conn, p, ["WLD"], 2019, 2021, force=False) == "loaded"
+    assert counts(conn)["core.observation"] == 3
+
+    # Same file, more countries: must load the new rows rather than skip.
+    assert ingest.load(conn, p, ["WLD", "PHL"], 2019, 2021, force=False) == "loaded"
+    after = counts(conn)
+    assert (after["raw.files"], after["core.observation"], after["core.observation_history"]) == (1, 5, 0)
+
+    # Now everything asked for is there: skip.
+    assert ingest.load(conn, p, ["WLD", "PHL"], 2019, 2021, force=False) == "skipped"
+    # Narrowing is a subset of what's loaded: also skip.
+    assert ingest.load(conn, p, ["PHL"], 2021, 2021, force=False) == "skipped"

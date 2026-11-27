@@ -38,10 +38,12 @@ export DATABASE_URL=postgresql://postgres:<password>@localhost:5432/geip
 .venv/bin/python ingest.py --no-fetch            # load the files already in datasources/ (offline)
 .venv/bin/python fetch.py                        # only download the latest CSVs into datasources/
 .venv/bin/python ingest.py --start-year 2000     # backfill a wider window
+.venv/bin/python ingest.py --countries first10countries.txt   # only these countries
 .venv/bin/pytest tests                           # DB tests need TEST_DATABASE_URL (a throwaway DB)
 ```
 
-Target countries are ISO3 codes in `first10countries.txt` (override with `--countries`). Each `datasources/<folder>/` holds one World Bank download
+By default every country in the World Bank metadata is loaded (aggregates such as World, regions and income
+groups are skipped). To limit it, pass a file of ISO3 codes: `--countries first10countries.txt`. Each `datasources/<folder>/` holds one World Bank download
 (`API_*.csv` + its two `Metadata_*` files); the folder name doesn't matter. Each run of `ingest.py` first
 re-downloads these from the World Bank (see `fetch.py`); if a download fails, the existing files are used.
 
