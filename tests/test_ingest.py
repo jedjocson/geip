@@ -159,3 +159,34 @@ def test_load_is_idempotent_and_keeps_revisions(conn, tmp_path):
         "SELECT old_value, new_value FROM core.observation_history"
     ).fetchone()
     assert (old, new) == (1.5, 1.7)
+
+
+def drop_schemas(conn):
+    conn.execute("DROP SCHEMA IF EXISTS core CASCADE; DROP SCHEMA IF EXISTS raw CASCADE")
+    conn.commit()
+
+
+def test_ensure_schema_creates_missing_tables(conn):
+    drop_schemas(conn)
+    assert len(ingest.missing_tables(conn)) == 6
+    ingest.ensure_schema(conn)
+    assert ingest.missing_tables(conn) == []
+
+    # A single missing table is recreated without touching the others' data.
+    conn.execute("INSERT INTO raw.files (source, path, sha256) VALUES ('t', 'p', repeat('a', 64))")
+    conn.execute("DROP TABLE core.observation_history")
+    conn.commit()
+    assert ingest.missing_tables(conn) == ["core.observation_history"]
+    ingest.ensure_schema(conn)
+    assert ingest.missing_tables(conn) == []
+    assert conn.execute("SELECT count(*) FROM raw.files").fetchone()[0] == 1
+
+
+def test_main_creates_schema_without_init_db(conn, tmp_path, monkeypatch):
+    drop_schemas(conn)
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    countries = tmp_path / "countries"
+    countries.write_text("PHL\nWLD\n")
+    sources = write_fixture(tmp_path / "ds")
+    assert ingest.main(["--sources", str(sources), "--countries", str(countries)]) == 0
+    assert counts(conn)["core.observation"] == 5

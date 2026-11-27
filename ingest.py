@@ -6,11 +6,12 @@ Each datasources/<folder>/ holds three files from a World Bank "Download CSV":
     Metadata_Indicator_API_<indicator>_...csv              indicator name and definition
 
 Usage:
-    python ingest.py --init-db                 # create tables, then ingest
+    python ingest.py                           # creates the schema first if it's missing
+    python ingest.py --init-db                 # re-apply schema.sql even if the tables exist
     python ingest.py --dry-run                 # parse + validate only, no database
     python ingest.py --start-year 2000         # backfill a wider window
     python ingest.py --force                   # reload files already ingested
-    python ingest.py --api                     # fetch from the World Bank API instead (wb_api.py)
+    python ingest.py --fetch                   # download fresh CSVs first (see fetch.py)
 
 Connection comes from DATABASE_URL (default postgresql://postgres@localhost:5432/geip);
 the password can come from PGPASSWORD or ~/.pgpass.
@@ -76,6 +77,8 @@ def discover(root: Path) -> list[SourceFile]:
     found = []
     for data in sorted(root.glob("*/API_*.csv")):
         folder = data.parent
+        if folder.name.startswith("."):  # fetch.py's in-progress/backup folders
+            continue
         stem = data.name  # Metadata files are named Metadata_<kind>_<data file name>
         country_meta = folder / f"Metadata_Country_{stem}"
         indicator_meta = folder / f"Metadata_Indicator_{stem}"
@@ -245,6 +248,22 @@ def init_db(conn) -> None:
     log.info("schema applied from %s", SCHEMA_FILE.name)
 
 
+def missing_tables(conn) -> list[str]:
+    """Tables declared in schema.sql that don't exist in the database yet."""
+    tables = re.findall(r"CREATE TABLE IF NOT EXISTS\s+([\w.]+)", SCHEMA_FILE.read_text(), re.I)
+    missing = [t for t in tables if conn.execute("SELECT to_regclass(%s)", (t,)).fetchone()[0] is None]
+    conn.rollback()  # end the read-only transaction psycopg opened
+    return missing
+
+
+def ensure_schema(conn) -> None:
+    """Create the raw/core schemas and tables if any are missing (schema.sql is idempotent)."""
+    missing = missing_tables(conn)
+    if missing:
+        log.info("database is missing %s; creating schema", ", ".join(missing))
+        init_db(conn)
+
+
 def load(conn, p: Parsed, targets: list[str], start: int, end: int, force: bool) -> str:
     """Load one file in a single transaction. Returns 'loaded' or 'skipped'."""
     src = p.source
@@ -399,33 +418,32 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start-year", type=int)
     ap.add_argument("--end-year", type=int, help="default: latest year in the files")
     ap.add_argument("--years", type=int, default=10, help="window size when --start-year is omitted")
-    ap.add_argument("--init-db", action="store_true", help="apply schema.sql first")
+    ap.add_argument("--init-db", action="store_true", help="re-apply schema.sql (missing tables are created automatically)")
     ap.add_argument("--dry-run", action="store_true", help="parse and validate only")
     ap.add_argument("--force", action="store_true", help="reload files already ingested")
-    ap.add_argument("--api", action="store_true",
-                    help="fetch from the World Bank API (see wb_api.py) instead of reading --sources")
+    ap.add_argument("--fetch", action="store_true", help="download fresh World Bank CSVs first (fetch.py)")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    targets = load_targets(args.countries)
-    fetch_failures = 0
-    if args.api:
-        import wb_api
+    if args.fetch:
+        import fetch
 
-        parsed, fetch_failures = wb_api.fetch(targets)
-        if not parsed:
-            log.error("nothing fetched from the World Bank API")
-            return 1
-    else:
-        sources = discover(args.sources)
-        if not sources:
-            log.error("no API_*.csv files under %s", args.sources)
-            return 1
-        parsed = [parse(src) for src in sources]
-    for p in parsed:
+        if fetch.fetch_all(args.sources):
+            log.warning("some downloads failed; ingesting the files already on disk for those")
+
+    targets = load_targets(args.countries)
+    sources = discover(args.sources)
+    if not sources:
+        log.error("no API_*.csv files under %s", args.sources)
+        return 1
+
+    parsed = []
+    for src in sources:
+        p = parse(src)
         for w in p.warnings:
-            log.warning("%s: %s", p.source.data.name, w)
+            log.warning("%s: %s", src.data.name, w)
+        parsed.append(p)
 
     start, end = year_window(parsed, args.start_year, args.end_year, args.years)
     log.info("%d files, %d target countries, years %d-%d", len(parsed), len(targets), start, end)
@@ -444,20 +462,22 @@ def main(argv: list[str] | None = None) -> int:
                 p.source.data.parent.name.strip(), len(p.observations), len(sel),
                 expected, expected - len(sel), p.source.source_updated,
             )
-        return 1 if fetch_failures else 0
+        return 0
 
     failures = 0
     with connect() as conn:
         if args.init_db:
             init_db(conn)
+        else:
+            ensure_schema(conn)
         for p in parsed:
             try:
                 load(conn, p, targets, start, end, args.force)
             except Exception:
                 failures += 1
                 log.exception("failed to load %s", p.source.data.name)
-    log.info("done: %d loaded or skipped, %d failed", len(parsed) - failures, failures + fetch_failures)
-    return 1 if failures or fetch_failures else 0
+    log.info("done: %d loaded or skipped, %d failed", len(parsed) - failures, failures)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
