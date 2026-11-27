@@ -26,6 +26,8 @@ SELECT o.country_code, c.country_name, c.is_aggregate,
  ORDER BY i.indicator_name, c.country_name, o.year
 """
 
+DEFAULT_COUNTRY = "PHL"  # shown on startup and whenever no country is selected
+
 COLUMNS = ["country_code", "country_name", "is_aggregate", "indicator_code", "indicator_name",
            "unit", "frequency", "year", "value", "source_updated"]
 
@@ -45,6 +47,19 @@ def load_data() -> pd.DataFrame:
 @st.cache_data(ttl=300, show_spinner="Loading data…")
 def cached_data() -> pd.DataFrame:
     return load_data()
+
+
+def default_country(df: pd.DataFrame, code: str = DEFAULT_COUNTRY) -> str:
+    """Name of the country shown by default: DEFAULT_COUNTRY if it has data, otherwise the
+    most populous country in the latest year, otherwise the first alphabetically."""
+    names = df.drop_duplicates("country_code").set_index("country_code")["country_name"]
+    if code in names.index:
+        return names[code]
+    real = df[~df.is_aggregate.astype(bool)]
+    pop = real[real.indicator_code == "SP.POP.TOTL"]
+    if not pop.empty:
+        return pop.sort_values("year").groupby("country_name").value.last().idxmax()
+    return sorted((real if not real.empty else df).country_name.unique())[0]
 
 
 def filter_data(df: pd.DataFrame, countries: list[str], years: tuple[int, int],
@@ -111,14 +126,15 @@ def main() -> None:
 
     indicators = sorted(df.indicator_name.unique())
     all_countries = sorted(df.country_name.unique())
-    default_countries = sorted(df.loc[~df.is_aggregate, "country_name"].unique()) or all_countries
+    fallback = default_country(df)
     year_min, year_max = int(df.year.min()), int(df.year.max())
 
     with st.sidebar:
         st.header("Filters")
         view = st.radio("View", ["One indicator", "All indicators"], horizontal=True)
         indicator = st.selectbox("Indicator", indicators) if view == "One indicator" else None
-        countries = st.multiselect("Countries", all_countries, default=default_countries)
+        countries = st.multiselect("Countries", all_countries, default=[fallback],
+                                   help=f"{len(all_countries)} available")
         years = st.slider("Years", year_min, year_max, (year_min, year_max)) \
             if year_min < year_max else (year_min, year_max)
         log = st.toggle("Log scale", help="Useful when countries differ by orders of magnitude "
@@ -128,8 +144,8 @@ def main() -> None:
             st.rerun()
 
     if not countries:
-        st.info("Select at least one country.")
-        st.stop()
+        countries = [fallback]
+        st.caption(f"No countries selected, showing {fallback}.")
 
     if indicator is not None:
         info = indicator_info(df, indicator)

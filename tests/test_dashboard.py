@@ -24,6 +24,21 @@ def frame():
     return pd.DataFrame(rows, columns=dashboard.COLUMNS)
 
 
+def test_default_country():
+    df = frame()
+    assert dashboard.default_country(df) == "Philippines"
+
+    # Without the Philippines in the data: the most populous real country (not World).
+    pop = pd.DataFrame(
+        [(c, n, False, "SP.POP.TOTL", "Population, total", "persons", "annual", 2020, v, None)
+         for c, n, v in [("ARM", "Armenia", 3.0), ("SVN", "Slovenia", 2.0)]]
+        + [("WLD", "World", True, "SP.POP.TOTL", "Population, total", "persons", "annual", 2020, 8e9, None)],
+        columns=dashboard.COLUMNS)
+    assert dashboard.default_country(pop) == "Armenia"
+    # No population data either: first alphabetically.
+    assert dashboard.default_country(df[df.country_code != "PHL"]) == "Armenia"
+
+
 def test_filter_data():
     df = frame()
     sel = dashboard.filter_data(df, ["Philippines"], (2020, 2021), "Ind A")
@@ -83,8 +98,13 @@ def test_page_with_data(app, conn, tmp_path):  # noqa: F811
     assert app.subheader[0].value == "Test indicator (annual %)"
     assert "annual %" in app.caption[0].value
     assert len(app.get("plotly_chart")) == 1
-    # World is an aggregate, so it isn't selected by default.
     assert app.sidebar.multiselect[0].value == ["Philippines"]
+
+    # Clearing the selection falls back to the Philippines instead of an empty page.
+    app.sidebar.multiselect[0].set_value([]).run()
+    assert not app.exception
+    assert any("showing Philippines" in c.value for c in app.caption)
+    assert len(app.get("plotly_chart")) == 1
 
     app.sidebar.toggle[0].set_value(True).run()
     assert not app.exception
