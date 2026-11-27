@@ -23,15 +23,12 @@ import io
 import logging
 import re
 import shutil
-import ssl
 import sys
 import time
-import urllib.error
-import urllib.request
 import zipfile
 from pathlib import Path
 
-import certifi
+import requests
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_SOURCES = ROOT / "datasources"
@@ -52,25 +49,21 @@ MAX_CSV_BYTES = 50 * 1024 * 1024
 log = logging.getLogger("fetch")
 
 
-def download(url: str, attempts: int = 4, timeout: float = 60) -> bytes:
-    """GET url, retrying network errors and 5xx/429 responses with backoff."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    # Use certifi's CA bundle: python.org builds on macOS ship without one.
-    ctx = ssl.create_default_context(cafile=certifi.where())
+def download(url: str, attempts: int = 4, timeout: float = 60,
+             session: requests.Session | None = None) -> bytes:
+    """GET url, retrying connection errors, timeouts and 429/5xx responses with backoff."""
+    session = session or requests.Session()
     for attempt in range(1, attempts + 1):
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                body = resp.read(MAX_ZIP_BYTES + 1)
-            if len(body) > MAX_ZIP_BYTES:
-                raise ValueError(f"{url}: response larger than {MAX_ZIP_BYTES} bytes")
-            return body
-        except urllib.error.HTTPError as exc:
-            if exc.code < 500 and exc.code != 429:
-                raise  # 4xx won't fix itself
-            err: Exception = exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-            if isinstance(getattr(exc, "reason", None), ssl.SSLCertVerificationError):
-                raise  # a certificate problem won't fix itself either
+            with session.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout, stream=True) as resp:
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    err: Exception = requests.HTTPError(f"{resp.status_code} {resp.reason}", response=resp)
+                else:
+                    resp.raise_for_status()  # other 4xx won't fix itself
+                    return _read_capped(resp, url)
+        except requests.exceptions.SSLError:
+            raise  # a certificate problem won't fix itself either
+        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
             err = exc
         if attempt == attempts:
             raise err
@@ -78,6 +71,17 @@ def download(url: str, attempts: int = 4, timeout: float = 60) -> bytes:
         log.warning("%s: %s, retrying in %ds (%d/%d)", url, err, wait, attempt, attempts)
         time.sleep(wait)
     raise AssertionError("unreachable")
+
+
+def _read_capped(resp: requests.Response, url: str) -> bytes:
+    """Read the body, stopping as soon as it passes MAX_ZIP_BYTES."""
+    chunks, size = [], 0
+    for chunk in resp.iter_content(chunk_size=64 * 1024):
+        size += len(chunk)
+        if size > MAX_ZIP_BYTES:
+            raise ValueError(f"{url}: response larger than {MAX_ZIP_BYTES} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def extract(blob: bytes, code: str) -> dict[str, bytes]:

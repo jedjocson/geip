@@ -2,11 +2,11 @@
 
 import io
 import sys
-import urllib.error
 import zipfile
 from pathlib import Path
 
 import pytest
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import fetch  # noqa: E402
@@ -105,29 +105,59 @@ def test_discover_ignores_dot_folders(served, tmp_path):
     assert len(ingest.discover(tmp_path)) == 1
 
 
-def test_download_retries_server_errors(monkeypatch):
-    calls = []
+def response(status: int, body: bytes = b"") -> requests.Response:
+    r = requests.Response()
+    r.status_code, r.reason, r.url = status, "reason", "http://x"
+    r._content, r._content_consumed = body, True
+    return r
 
-    def fake_urlopen(req, timeout, context=None):
-        calls.append(req.full_url)
-        if len(calls) < 3:
-            raise urllib.error.HTTPError(req.full_url, 503, "busy", {}, None)
-        return io.BytesIO(b"ok")
 
-    monkeypatch.setattr(fetch.urllib.request, "urlopen", fake_urlopen)
+class FakeSession:
+    """Returns (or raises) the queued items in order; records each call."""
+
+    def __init__(self, *items):
+        self.items, self.calls = list(items), []
+
+    def get(self, url, **kwargs):
+        self.calls.append(kwargs)
+        item = self.items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
     monkeypatch.setattr(fetch.time, "sleep", lambda s: None)
-    assert fetch.download("http://x") == b"ok"
-    assert len(calls) == 3
 
 
-def test_download_does_not_retry_client_errors(monkeypatch):
-    calls = []
+def test_download_retries_server_errors_and_network_failures():
+    session = FakeSession(response(503), requests.ConnectionError("reset"), requests.Timeout("slow"),
+                          response(200, b"ok"))
+    assert fetch.download("http://x", session=session) == b"ok"
+    assert len(session.calls) == 4
+    assert session.calls[0]["headers"]["User-Agent"] == fetch.USER_AGENT
 
-    def fake_urlopen(req, timeout, context=None):
-        calls.append(1)
-        raise urllib.error.HTTPError(req.full_url, 404, "nope", {}, None)
 
-    monkeypatch.setattr(fetch.urllib.request, "urlopen", fake_urlopen)
-    with pytest.raises(urllib.error.HTTPError):
-        fetch.download("http://x")
-    assert len(calls) == 1
+def test_download_gives_up_after_attempts():
+    session = FakeSession(*[response(503) for _ in range(4)])
+    with pytest.raises(requests.HTTPError, match="503"):
+        fetch.download("http://x", session=session)
+    assert len(session.calls) == 4
+
+
+@pytest.mark.parametrize("item, exc", [
+    (response(404), requests.HTTPError),
+    (requests.exceptions.SSLError("CERTIFICATE_VERIFY_FAILED"), requests.exceptions.SSLError),
+])
+def test_download_does_not_retry_permanent_errors(item, exc):
+    session = FakeSession(item, response(200, b"ok"))
+    with pytest.raises(exc):
+        fetch.download("http://x", session=session)
+    assert len(session.calls) == 1
+
+
+def test_download_caps_size(monkeypatch):
+    monkeypatch.setattr(fetch, "MAX_ZIP_BYTES", 10)
+    with pytest.raises(ValueError, match="larger than 10 bytes"):
+        fetch.download("http://x", session=FakeSession(response(200, b"x" * 11)))
