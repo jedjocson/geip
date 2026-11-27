@@ -32,17 +32,18 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 createdb geip                                    # once
 export DATABASE_URL=postgresql://postgres:<password>@localhost:5432/geip
 
-.venv/bin/python fetch.py                        # download latest World Bank CSVs into datasources/
-.venv/bin/python ingest.py --dry-run             # parse + validate, no database
-.venv/bin/python ingest.py --fetch               # download, then load (unchanged downloads are skipped)
-.venv/bin/python ingest.py                       # first run creates the tables, then loads
-.venv/bin/python ingest.py                       # rerun: unchanged files are skipped
+.venv/bin/python ingest.py --dry-run             # download, parse + validate, no database
+.venv/bin/python ingest.py                       # download, create tables if missing, load
+.venv/bin/python ingest.py                       # rerun: unchanged downloads are skipped
+.venv/bin/python ingest.py --no-fetch            # load the files already in datasources/ (offline)
+.venv/bin/python fetch.py                        # only download the latest CSVs into datasources/
 .venv/bin/python ingest.py --start-year 2000     # backfill a wider window
 .venv/bin/pytest tests                           # DB tests need TEST_DATABASE_URL (a throwaway DB)
 ```
 
 Target countries are ISO3 codes in `first10countries.txt` (override with `--countries`). Each `datasources/<folder>/` holds one World Bank download
-(`API_*.csv` + its two `Metadata_*` files); the folder name doesn't matter.
+(`API_*.csv` + its two `Metadata_*` files); the folder name doesn't matter. Each run of `ingest.py` first
+re-downloads these from the World Bank (see `fetch.py`); if a download fails, the existing files are used.
 
 Tables: `raw.files` (one row per file, sha256, source date, status), `raw.observations` (every value as parsed),
 `core.country`, `core.indicator` (with unit and frequency), `core.observation` (target countries and years),

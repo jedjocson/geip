@@ -5,13 +5,16 @@ Each datasources/<folder>/ holds three files from a World Bank "Download CSV":
     Metadata_Country_API_<indicator>_...csv                country code, region, income group
     Metadata_Indicator_API_<indicator>_...csv              indicator name and definition
 
+Every run first downloads the latest CSVs into --sources (fetch.py), unless --no-fetch.
+If a download fails, the files already on disk for that indicator are used.
+
 Usage:
-    python ingest.py                           # creates the schema first if it's missing
+    python ingest.py                           # fetch, create the schema if missing, load
+    python ingest.py --no-fetch                # load the files already in datasources/
     python ingest.py --init-db                 # re-apply schema.sql even if the tables exist
     python ingest.py --dry-run                 # parse + validate only, no database
     python ingest.py --start-year 2000         # backfill a wider window
     python ingest.py --force                   # reload files already ingested
-    python ingest.py --fetch                   # download fresh CSVs first (see fetch.py)
 
 Connection comes from DATABASE_URL (default postgresql://postgres@localhost:5432/geip);
 the password can come from PGPASSWORD or ~/.pgpass.
@@ -421,12 +424,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--init-db", action="store_true", help="re-apply schema.sql (missing tables are created automatically)")
     ap.add_argument("--dry-run", action="store_true", help="parse and validate only")
     ap.add_argument("--force", action="store_true", help="reload files already ingested")
-    ap.add_argument("--fetch", action="store_true", help="download fresh World Bank CSVs first (fetch.py)")
+    ap.add_argument("--no-fetch", action="store_true",
+                    help="skip downloading fresh World Bank CSVs; use the files already in --sources")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.fetch:
+    if not args.no_fetch:
         import fetch
 
         if fetch.fetch_all(args.sources):

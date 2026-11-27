@@ -188,5 +188,36 @@ def test_main_creates_schema_without_init_db(conn, tmp_path, monkeypatch):
     countries = tmp_path / "countries"
     countries.write_text("PHL\nWLD\n")
     sources = write_fixture(tmp_path / "ds")
-    assert ingest.main(["--sources", str(sources), "--countries", str(countries)]) == 0
+    assert ingest.main(["--no-fetch", "--sources", str(sources), "--countries", str(countries)]) == 0
     assert counts(conn)["core.observation"] == 5
+
+
+@pytest.mark.parametrize("argv, fetched", [([], True), (["--no-fetch"], False)])
+def test_main_fetches_before_ingesting(tmp_path, monkeypatch, argv, fetched):
+    import fetch
+
+    calls = []
+
+    def fake_fetch_all(sources):
+        calls.append(sources)
+        write_fixture(sources)  # the download is what puts the files there
+        return 0
+
+    monkeypatch.setattr(fetch, "fetch_all", fake_fetch_all)
+    sources = tmp_path / "ds"
+    if not fetched:
+        write_fixture(sources)
+    countries = tmp_path / "countries"
+    countries.write_text("PHL\n")
+    assert ingest.main([*argv, "--dry-run", "--sources", str(sources), "--countries", str(countries)]) == 0
+    assert calls == ([sources] if fetched else [])
+
+
+def test_main_uses_existing_files_when_fetch_fails(tmp_path, monkeypatch):
+    import fetch
+
+    monkeypatch.setattr(fetch, "fetch_all", lambda sources: 4)
+    sources = write_fixture(tmp_path / "ds")
+    countries = tmp_path / "countries"
+    countries.write_text("PHL\n")
+    assert ingest.main(["--dry-run", "--sources", str(sources), "--countries", str(countries)]) == 0

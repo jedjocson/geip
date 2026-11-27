@@ -13,7 +13,7 @@ failed download leaves the previous files untouched.
 Usage:
     python fetch.py                    # all indicators
     python fetch.py GDP inflation      # only these folders
-    python ingest.py --fetch           # fetch, then ingest
+    python ingest.py                   # ingest without args fetches by default
 """
 
 from __future__ import annotations
